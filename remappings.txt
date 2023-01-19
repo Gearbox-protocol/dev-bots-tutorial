@@ -1,0 +1,4 @@
+@ds-test/=lib/forge-std/lib/ds-test/src/
+@forge-std/=lib/forge-std/src/
+@gearbox-protocol/=lib/gearbox-protocol/
+@openzeppelin/=lib/openzeppelin-contracts/
