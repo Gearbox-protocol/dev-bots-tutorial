@@ -78,7 +78,7 @@ contract LimitOrderBot {
     /// @notice When user tries to submit/cancel other user's order.
     error CallerNotBorrower();
 
-    /// @notice 
+    /// @notice When order can't be executed because it's incorrect.
     error InvalidOrder();
 
     /// @notice When trying to execute order after deadline.
@@ -192,8 +192,8 @@ contract LimitOrderBot {
     /// @dev Checks if order can be executed:
     ///      * order must be correctly constructed and not expired;
     ///      * trigger condition must hold if trigger price is set;
-    ///      * borrower must have an account in manager with non-empty balance
-    ///        of the input token.
+    ///      * borrower must have an account in manager with non-empty
+    ///        input token balance.
     function _validateOrder(Order memory order)
         internal
         view
@@ -397,7 +397,7 @@ contract LimitOrderBot {
         tokenSpent = path[0];
     }
 
-    /// @dev Truncates the address array to given length.
+    /// @dev Truncates the address array to a given length.
     function _truncate(address[] memory array, uint256 length)
         internal
         pure
