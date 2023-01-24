@@ -26,7 +26,7 @@ contract AccountManagerBot is Ownable {
     /// --------------- ///
 
     /// @dev Approved managers.
-    mapping(address => bool) private _managers;
+    mapping(address => bool) public managers;
 
     /// @notice Registered users data (user => manager => data).
     mapping(address => mapping(address => UserData)) public userData;
@@ -37,6 +37,12 @@ contract AccountManagerBot is Ownable {
 
     /// @dev When operation is executed not by approved manager.
     error CallerNotManager();
+
+    /// @dev When user tries to set any of loss caps to zero upon registration.
+    error ZeroLossCap();
+
+    /// @dev When trying to perform an operation with unregistered user's account.
+    error UserNotRegistered();
 
     /// @dev When operation cannot be executed because total loss cap is reached.
     error TotalLossCapReached();
@@ -53,7 +59,7 @@ contract AccountManagerBot is Ownable {
 
     /// @dev Reverts if caller is not one of approved managers.
     modifier onlyManager() {
-        if (!_managers[msg.sender])
+        if (!managers[msg.sender])
             revert CallerNotManager();
         _;
     }
@@ -66,15 +72,15 @@ contract AccountManagerBot is Ownable {
     /// @param manager Account to change the status for.
     /// @param status New status.
     function setManager(address manager, bool status) external onlyOwner {
-        _managers[manager] = status;
+        managers[manager] = status;
     }
 
-    /// @notice Allow bot to manage account in given credit manager.
+    /// @notice Allow bot to perform operations on account in given credit manager.
     /// @param creditManager Credit manager.
     /// @param totalLossCap Cap on drop of account total value
-    ///        in credit manager's underlying currency.
+    ///        in credit manager's underlying currency. Can't be 0.
     /// @param intraOpLossCap Cap on cumulative intra-operation drop of account total value
-    ///        in credit manager's underlying currency.
+    ///        in credit manager's underlying currency. Can't be 0.
     function register(
         address creditManager,
         uint256 totalLossCap,
@@ -87,6 +93,8 @@ contract AccountManagerBot is Ownable {
 
         (data.initialValue, ) = ICreditFacade(facade).calcTotalValue(account);
 
+        if (totalLossCap == 0 || intraOpLossCap == 0)
+            revert ZeroLossCap();
         data.totalLossCap = totalLossCap;
         data.intraOpLossCap = intraOpLossCap;
     }
@@ -107,6 +115,8 @@ contract AccountManagerBot is Ownable {
         MultiCall[] calldata calls
     ) external onlyManager {
         UserData storage data = userData[user][creditManager];
+        if (data.totalLossCap == 0)
+            revert UserNotRegistered();
 
         address account = ICreditManagerV2(creditManager).getCreditAccountOrRevert(user);
         address facade = ICreditManagerV2(creditManager).creditFacade();
