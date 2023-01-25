@@ -118,46 +118,28 @@ contract AccountManagerBot is Ownable {
         if (data.totalLossCap == 0)
             revert UserNotRegistered();
 
-        address account = ICreditManagerV2(creditManager).getCreditAccountOrRevert(user);
         address facade = ICreditManagerV2(creditManager).creditFacade();
+        _validateCallsDontChangeDebt(facade, calls);
 
+        address account = ICreditManagerV2(creditManager).getCreditAccountOrRevert(user);
         (uint256 totalValueBefore, ) = ICreditFacade(facade).calcTotalValue(account);
-        _validateLosses(totalValueBefore, data);
 
-        _validateCalls(facade, calls);
         ICreditFacade(facade).botMulticall(user, calls);
 
         (uint256 totalValueAfter, ) = ICreditFacade(facade).calcTotalValue(account);
-        if (totalValueAfter < totalValueBefore) {
-            uint256 intraOpLoss;
-            unchecked {
-                intraOpLoss = totalValueBefore - totalValueAfter;
-            }
-            data.intraOpLoss += intraOpLoss;
-        } else {
-            uint256 intraOpGain;
-            unchecked {
-                intraOpGain = totalValueAfter - totalValueBefore;
-            }
-            data.intraOpGain += intraOpGain;
-        }
-        _validateLosses(totalValueAfter, data);
+        bool isLoss = _updateIntraOpLossOrGain(totalValueBefore, totalValueAfter, data);
+        if (isLoss && data.intraOpGain + data.intraOpLossCap < data.intraOpLoss)
+            revert IntraOpLossCapReached();
+        if (totalValueAfter + data.totalLossCap < data.initialValue)
+            revert TotalLossCapReached();
     }
 
     /// ------------------ ///
     /// INTERNAL FUNCTIONS ///
     /// ------------------ ///
 
-    /// @dev Checks that none of loss caps are reached.
-    function _validateLosses(uint256 totalValue, UserData memory data) internal pure {
-        if (totalValue + data.totalLossCap < data.initialValue)
-            revert TotalLossCapReached();
-        if (data.intraOpGain + data.intraOpLossCap < data.intraOpLoss)
-            revert IntraOpLossCapReached();
-    }
-
     /// @dev Checks that calls don't try to change account's debt.
-    function _validateCalls(address facade, MultiCall[] calldata calls) internal pure {
+    function _validateCallsDontChangeDebt(address facade, MultiCall[] calldata calls) internal pure {
         for (uint256 i = 0; i < calls.length; ) {
             MultiCall calldata mcall = calls[i];
             if (mcall.target == facade) {
@@ -171,6 +153,30 @@ contract AccountManagerBot is Ownable {
             unchecked {
                 ++i;
             }
+        }
+    }
+
+    /// @dev Updates intra-operation loss/gain given account's value before and after the operation.
+    ///      Returns true if value decreased during the operation and false otherwise.
+    function _updateIntraOpLossOrGain(
+        uint256 totalValueBefore,
+        uint256 totalValueAfter,
+        UserData storage data
+    ) internal returns (bool) {
+        if (totalValueAfter < totalValueBefore) {
+            uint256 intraOpLoss;
+            unchecked {
+                intraOpLoss = totalValueBefore - totalValueAfter;
+            }
+            data.intraOpLoss += intraOpLoss;
+            return true;
+        } else {
+            uint256 intraOpGain;
+            unchecked {
+                intraOpGain = totalValueAfter - totalValueBefore;
+            }
+            data.intraOpGain += intraOpGain;
+            return false;
         }
     }
 }
