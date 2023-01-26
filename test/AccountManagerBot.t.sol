@@ -13,6 +13,7 @@ import { CreditFacade } from "@gearbox-protocol/core-v2/contracts/credit/CreditF
 import { CreditManager } from "@gearbox-protocol/core-v2/contracts/credit/CreditManager.sol";
 import { ICreditManagerV2Exceptions } from "@gearbox-protocol/core-v2/contracts/interfaces/ICreditManagerV2.sol";
 
+import { ISwapRouter } from "@gearbox-protocol/integrations-v2/contracts/integrations/uniswap/IUniswapV3.sol";
 import { IUniswapV3Adapter } from "@gearbox-protocol/integrations-v2/contracts/interfaces/uniswap/IUniswapV3Adapter.sol";
 
 
@@ -32,6 +33,9 @@ contract AccountManagerBotTest is Test {
 
     address private constant USER = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
     address private constant MANAGER = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
+    uint256 private constant INITIAL_VALUE = 100 ether;
+    uint256 private constant TOTAL_LOSS_CAP = 10 ether;
+    uint256 private constant INTRA_OP_LOSS_CAP = 1 ether;
 
     /// ----- ///
     /// SETUP ///
@@ -57,6 +61,10 @@ contract AccountManagerBotTest is Test {
         // connect the new facade to the manager
         manager.upgradeCreditFacade(address(facade));
         vm.stopPrank();
+
+        // approve bot
+        vm.prank(USER);
+        botList.setBotStatus(address(bot), true);
     }
 
     /// ----------------- ///
@@ -92,47 +100,55 @@ contract AccountManagerBotTest is Test {
     /// USER CONFIG TESTS ///
     /// ----------------- ///
 
-    function test_register_reverts_if_user_has_no_account() public {
+    function test_register_reverts_on_user_without_account() public {
         vm.prank(USER);
         vm.expectRevert(ICreditManagerV2Exceptions.HasNoOpenedAccountException.selector);
-        bot.register(WETH_CREDIT_MANAGER, 0, 0);
+        bot.register(WETH_CREDIT_MANAGER, TOTAL_LOSS_CAP, INTRA_OP_LOSS_CAP);
     }
 
     function test_register_reverts_on_zero_loss_cap() public {
-        _createTestAccount(USER);
+        _createTestAccount();
 
         vm.prank(USER);
         vm.expectRevert(AccountManagerBot.ZeroLossCap.selector);
-        bot.register(WETH_CREDIT_MANAGER, 1, 0);
+        bot.register(WETH_CREDIT_MANAGER, TOTAL_LOSS_CAP, 0);
 
         vm.prank(USER);
         vm.expectRevert(AccountManagerBot.ZeroLossCap.selector);
-        bot.register(WETH_CREDIT_MANAGER, 0, 1);
+        bot.register(WETH_CREDIT_MANAGER, 0, INTRA_OP_LOSS_CAP);
     }
 
-    function test_register_and_deregister_work_correctly() public {
-        address account = _createTestAccount(USER);
-        (uint256 initialValue, ) = facade.calcTotalValue(account);
-
-        uint256 totalLossCap = 10 ether;
-        uint256 intraOpLossCap = 1 ether;
-        uint256 userTotalLossCap;
-        uint256 userIntraOpLossCap;
-        uint256 userInitialValue;
+    function test_register_works_correctly() public {
+        _createTestAccount();
 
         vm.prank(USER);
-        bot.register(WETH_CREDIT_MANAGER, 10 ether, 1 ether);
-        (userTotalLossCap, userIntraOpLossCap, userInitialValue, , ) = bot.userData(USER, WETH_CREDIT_MANAGER);
-        assertEq(userTotalLossCap, totalLossCap);
-        assertEq(userIntraOpLossCap, intraOpLossCap);
-        assertEq(userInitialValue, initialValue);
+        bot.register(WETH_CREDIT_MANAGER, TOTAL_LOSS_CAP, INTRA_OP_LOSS_CAP);
+        (
+            uint256 totalLossCap,
+            uint256 intraOpLossCap,
+            uint256 initialValue, ,
+        ) = bot.userData(USER, WETH_CREDIT_MANAGER);
+        assertEq(totalLossCap, TOTAL_LOSS_CAP);
+        assertEq(intraOpLossCap, INTRA_OP_LOSS_CAP);
+        assertEq(initialValue, INITIAL_VALUE);
+    }
+
+    function test_deregister_works_correctly() public {
+        _createTestAccount();
+
+        vm.prank(USER);
+        bot.register(WETH_CREDIT_MANAGER, TOTAL_LOSS_CAP, INTRA_OP_LOSS_CAP);
 
         vm.prank(USER);
         bot.deregister(WETH_CREDIT_MANAGER);
-        (userTotalLossCap, userIntraOpLossCap, userInitialValue, , ) = bot.userData(USER, WETH_CREDIT_MANAGER);
-        assertEq(userTotalLossCap, 0);
-        assertEq(userIntraOpLossCap, 0);
-        assertEq(userInitialValue, 0);
+        (
+            uint256 totalLossCap,
+            uint256 intraOpLossCap,
+            uint256 initialValue, ,
+        ) = bot.userData(USER, WETH_CREDIT_MANAGER);
+        assertEq(totalLossCap, 0);
+        assertEq(intraOpLossCap, 0);
+        assertEq(initialValue, 0);
     }
 
     /// ---------------- ///
@@ -140,24 +156,26 @@ contract AccountManagerBotTest is Test {
     /// ---------------- ///
 
     function test_performOperation_reverts_on_non_manager_caller() public {
-        _createTestAccount(USER);
+        _createTestAccount();
 
         vm.prank(USER);
-        bot.register(WETH_CREDIT_MANAGER, 10 ether, 1 ether);
+        bot.register(WETH_CREDIT_MANAGER, TOTAL_LOSS_CAP, INTRA_OP_LOSS_CAP);
+
+        MultiCall[] memory calls;
 
         vm.prank(MANAGER);
-        MultiCall[] memory calls;
         vm.expectRevert(AccountManagerBot.CallerNotManager.selector);
         bot.performOperation(USER, WETH_CREDIT_MANAGER, calls);
     }
 
     function test_performOperation_reverts_on_not_registered_user() public {
         bot.setManager(MANAGER, true);
-        
-        _createTestAccount(USER);
+
+        _createTestAccount();
+
+        MultiCall[] memory calls;
 
         vm.prank(MANAGER);
-        MultiCall[] memory calls;
         vm.expectRevert(AccountManagerBot.UserNotRegistered.selector);
         bot.performOperation(USER, WETH_CREDIT_MANAGER, calls);
     }
@@ -165,63 +183,58 @@ contract AccountManagerBotTest is Test {
     function test_performOperation_reverts_on_change_debt_calls() public {
         bot.setManager(MANAGER, true);
 
-        _createTestAccount(USER);
+        _createTestAccount();
         vm.prank(USER);
-        bot.register(WETH_CREDIT_MANAGER, 10 ether, 1 ether);
+        bot.register(WETH_CREDIT_MANAGER, TOTAL_LOSS_CAP, INTRA_OP_LOSS_CAP);
 
         MultiCall[] memory calls = new MultiCall[](1);
 
-        vm.prank(MANAGER);
         calls[0] = MultiCall({
             target: address(facade),
-            callData: abi.encodeWithSelector(
-                CreditFacade.increaseDebt.selector,
-                10 ether
-            )
+            callData: abi.encodeWithSelector(CreditFacade.increaseDebt.selector, 1)
         });
+        vm.prank(MANAGER);
         vm.expectRevert(AccountManagerBot.ChangeDebtForbidden.selector);
         bot.performOperation(USER, WETH_CREDIT_MANAGER, calls);
 
-        vm.prank(MANAGER);
         calls[0] = MultiCall({
             target: address(facade),
-            callData: abi.encodeWithSelector(
-                CreditFacade.decreaseDebt.selector,
-                10 ether
-            )
+            callData: abi.encodeWithSelector(CreditFacade.decreaseDebt.selector, 1)
         });
+        vm.prank(MANAGER);
         vm.expectRevert(AccountManagerBot.ChangeDebtForbidden.selector);
         bot.performOperation(USER, WETH_CREDIT_MANAGER, calls);
     }
 
-    function test_perform_operation_reverts_on_reaching_intra_op_loss_cap() public {
+    function test_performOperation_reverts_on_reaching_intra_op_loss_cap() public {
         bot.setManager(MANAGER, true);
 
-        _createTestAccount(USER);
-
-        uint256 totalLossCap = 10 ether;
-        uint256 intraOpLossCap = 0.1 ether;
-
+        _createTestAccount();
         vm.prank(USER);
-        bot.register(WETH_CREDIT_MANAGER, totalLossCap, intraOpLossCap);
+        bot.register(WETH_CREDIT_MANAGER, TOTAL_LOSS_CAP, INTRA_OP_LOSS_CAP);
 
-        MultiCall[] memory calls = new MultiCall[](1);
+        MultiCall[] memory calls = new MultiCall[](2);
 
         calls[0] = MultiCall({
             target: manager.contractToAdapter(UNISWAP_V3_ROUTER),
             callData: abi.encodeWithSelector(
-                IUniswapV3Adapter.exactAllInputSingle.selector,
-                IUniswapV3Adapter.ExactAllInputSingleParams({
-                    tokenIn: USDC,
-                    tokenOut: WETH,
-                    fee: 10000, // pool with thin liquidity
+                ISwapRouter.exactInputSingle.selector,
+                ISwapRouter.ExactInputSingleParams({
+                    tokenIn: WETH,
+                    tokenOut: USDC,
+                    fee: 500,
+                    recipient: address(0),
                     deadline: block.timestamp,
-                    rateMinRAY: 0,
+                    amountIn: 2 * INTRA_OP_LOSS_CAP,
+                    amountOutMinimum: 0,
                     sqrtPriceLimitX96: 0
                 })
             )
         });
-
+        calls[1] = MultiCall({
+            target: address(facade),
+            callData: abi.encodeWithSignature("disableToken(address)", USDC)
+        });
         vm.prank(MANAGER);
         vm.expectRevert(AccountManagerBot.IntraOpLossCapReached.selector);
         bot.performOperation(USER, WETH_CREDIT_MANAGER, calls);
@@ -230,23 +243,19 @@ contract AccountManagerBotTest is Test {
     function test_performOperation_reverts_on_reaching_total_loss_cap() public {
         bot.setManager(MANAGER, true);
 
-        address account = _createTestAccount(USER);
-        (uint256 initialValue, ) = facade.calcTotalValue(account);
-
-        uint256 totalLossCap = 10 ether;
-        uint256 intraOpLossCap = 1 ether;
-
+        _createTestAccount();
         vm.prank(USER);
-        bot.register(WETH_CREDIT_MANAGER, totalLossCap, intraOpLossCap);
+        bot.register(WETH_CREDIT_MANAGER, TOTAL_LOSS_CAP, INTRA_OP_LOSS_CAP);
 
         MultiCall[] memory calls = new MultiCall[](1);
+
         calls[0] = MultiCall({
             target: manager.contractToAdapter(UNISWAP_V3_ROUTER),
             callData: abi.encodeWithSelector(
                 IUniswapV3Adapter.exactAllInputSingle.selector,
                 IUniswapV3Adapter.ExactAllInputSingleParams({
-                    tokenIn: DAI,
-                    tokenOut: WETH,
+                    tokenIn: WETH,
+                    tokenOut: USDC,
                     fee: 500,
                     deadline: block.timestamp,
                     rateMinRAY: 0,
@@ -254,15 +263,11 @@ contract AccountManagerBotTest is Test {
                 })
             )
         });
-
         vm.prank(MANAGER);
         vm.mockCall(
             address(facade),
-            abi.encodeWithSelector(
-                CreditFacade.calcTotalValue.selector,
-                address(account)
-            ),
-            abi.encode(initialValue - totalLossCap - 1, 0)
+            abi.encodePacked(CreditFacade.calcTotalValue.selector),
+            abi.encode(INITIAL_VALUE - TOTAL_LOSS_CAP - 1, 0)
         );
         vm.expectRevert(AccountManagerBot.TotalLossCapReached.selector);
         bot.performOperation(USER, WETH_CREDIT_MANAGER, calls);
@@ -271,23 +276,20 @@ contract AccountManagerBotTest is Test {
     function test_performOperation_works_correctly() public {
         bot.setManager(MANAGER, true);
 
-        address account = _createTestAccount(USER);
-        (uint256 initialValue, ) = facade.calcTotalValue(account);
-
-        uint256 totalLossCap = 10 ether;
-        uint256 intraOpLossCap = 1 ether;
+        address account = _createTestAccount();
 
         vm.prank(USER);
-        bot.register(WETH_CREDIT_MANAGER, totalLossCap, intraOpLossCap);
+        bot.register(WETH_CREDIT_MANAGER, TOTAL_LOSS_CAP, INTRA_OP_LOSS_CAP);
 
         MultiCall[] memory calls = new MultiCall[](1);
+
         calls[0] = MultiCall({
             target: manager.contractToAdapter(UNISWAP_V3_ROUTER),
             callData: abi.encodeWithSelector(
                 IUniswapV3Adapter.exactAllInputSingle.selector,
                 IUniswapV3Adapter.ExactAllInputSingleParams({
-                    tokenIn: DAI,
-                    tokenOut: WETH,
+                    tokenIn: WETH,
+                    tokenOut: USDC,
                     fee: 500,
                     deadline: block.timestamp,
                     rateMinRAY: 0,
@@ -295,7 +297,6 @@ contract AccountManagerBotTest is Test {
                 })
             )
         });
-
         vm.prank(MANAGER);
         vm.expectCall(address(facade), abi.encodePacked(CreditFacade.botMulticall.selector));
         bot.performOperation(USER, WETH_CREDIT_MANAGER, calls);
@@ -303,13 +304,14 @@ contract AccountManagerBotTest is Test {
         (uint256 totalValueAfter, ) = facade.calcTotalValue(account);
         ( , , , uint256 intraOpLoss, uint256 intraOpGain) = bot.userData(USER, WETH_CREDIT_MANAGER);
 
-        assertGt(totalValueAfter + totalLossCap, initialValue);
+        assertGt(totalValueAfter + TOTAL_LOSS_CAP, INITIAL_VALUE);
+        assertLt(intraOpLoss, INTRA_OP_LOSS_CAP);
+        assertGt(intraOpLoss + intraOpGain, 0);
         if (intraOpLoss > 0) {
-            assertLt(intraOpLoss, intraOpLossCap);
-            assertEq(totalValueAfter + intraOpLoss, initialValue);
+            assertEq(totalValueAfter + intraOpLoss, INITIAL_VALUE);
         }
         if (intraOpGain > 0)
-            assertEq(initialValue + intraOpGain, totalValueAfter);
+            assertEq(INITIAL_VALUE + intraOpGain, totalValueAfter);
     }
 
     /// ------- ///
@@ -321,47 +323,14 @@ contract AccountManagerBotTest is Test {
         return address(this);
     }
 
-    /// @dev Opens an account for the user with 50K USDC collateral and 100 WETH
-    ///      borrowed and swapped into DAI.
-    function _createTestAccount(address user)
-        internal
-        returns (address account)
-    {
-        uint256 wethAmount = 100 ether;
-        uint256 usdcBalance = 50_000 * 10**6;
-
-        MultiCall[] memory calls = new MultiCall[](2);
-        calls[0] = MultiCall({
-            target: address(facade),
-            callData: abi.encodeWithSelector(
-                CreditFacade.addCollateral.selector,
-                user,
-                USDC,
-                usdcBalance
-            )
-        });
-        calls[1] = MultiCall({
-            target: manager.contractToAdapter(UNISWAP_V3_ROUTER),
-            callData: abi.encodeWithSelector(
-                IUniswapV3Adapter.exactAllInputSingle.selector,
-                IUniswapV3Adapter.ExactAllInputSingleParams({
-                    tokenIn: WETH,
-                    tokenOut: DAI,
-                    fee: 500,
-                    deadline: block.timestamp,
-                    rateMinRAY: 0,
-                    sqrtPriceLimitX96: 0
-                })
-            )
-        });
-
-        deal(USDC, user, usdcBalance);
-        vm.startPrank(user);
-        IERC20(USDC).approve(WETH_CREDIT_MANAGER, usdcBalance);
-        facade.openCreditAccountMulticall(wethAmount, user, calls, 0);
-        botList.setBotStatus(address(bot), true);
+    /// @dev Opens a credit account for user with 50 WETH user's collateral and 2x leverage.
+    function _createTestAccount() internal returns (address) {
+        uint256 wethAmount = INITIAL_VALUE / 2;
+        deal(WETH, USER, wethAmount);
+        vm.startPrank(USER);
+        IERC20(WETH).approve(WETH_CREDIT_MANAGER, wethAmount);
+        facade.openCreditAccount(wethAmount, USER, 100, 0);
         vm.stopPrank();
-
-        account = manager.getCreditAccountOrRevert(user);
+        return manager.getCreditAccountOrRevert(USER);
     }
 }
