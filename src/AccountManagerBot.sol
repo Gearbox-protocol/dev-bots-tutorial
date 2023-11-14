@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.10;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
@@ -8,7 +8,7 @@ import {
     CollateralDebtData,
     CollateralCalcTask
 } from "@gearbox-protocol/core-v3/contracts/interfaces/ICreditManagerV3.sol";
-import {ICreditFacadeV3} from "@gearbox-protocol/core-v3/contracts/interfaces/ICreditFacadeV3.sol";
+import {ICreditFacadeV3, MultiCall} from "@gearbox-protocol/core-v3/contracts/interfaces/ICreditFacadeV3.sol";
 import {ICreditFacadeV3Multicall} from "@gearbox-protocol/core-v3/contracts/interfaces/ICreditFacadeV3Multicall.sol";
 
 /// @notice User data.
@@ -24,9 +24,9 @@ struct CreditAccountData {
 /// @title Account manager bot.
 /// @notice Allows Gearbox users to transfer control over account to permissioned managers.
 contract AccountManagerBot is Ownable {
-    /// --------------- ///
-    /// STATE VARIABLES ///
-    /// --------------- ///
+    // --------------- //
+    // STATE VARIABLES //
+    // --------------- //
 
     /// @dev Approved managers.
     mapping(address => bool) public managers;
@@ -34,9 +34,9 @@ contract AccountManagerBot is Ownable {
     /// @notice Registered users data (creditAccount => manager => data).
     mapping(address => mapping(address => CreditAccountData)) public creditAccountData;
 
-    /// ------ ///
-    /// ERRORS ///
-    /// ------ ///
+    // ------ //
+    // ERRORS //
+    // ------ //
 
     /// @dev When operation is executed not by approved manager.
     error CallerNotManager();
@@ -59,9 +59,9 @@ contract AccountManagerBot is Ownable {
     /// @dev When operation cannot be executed because it tries to manipulate account's debt.
     error ChangeDebtForbidden();
 
-    /// --------- ///
-    /// MODIFIERS ///
-    /// --------- ///
+    // --------- //
+    // MODIFIERS //
+    // --------- //
 
     /// @dev Reverts if caller is not one of approved managers.
     modifier onlyManager() {
@@ -71,9 +71,11 @@ contract AccountManagerBot is Ownable {
         _;
     }
 
-    /// ------------------ ///
-    /// EXTERNAL FUNCTIONS ///
-    /// ------------------ ///
+    constructor() Ownable(msg.sender) {}
+
+    // ------------------ //
+    // EXTERNAL FUNCTIONS //
+    // ------------------ //
 
     /// @notice Add or remove manager.
     /// @param manager Account to change the status for.
@@ -92,14 +94,12 @@ contract AccountManagerBot is Ownable {
     function register(address creditManager, address creditAccount, uint256 totalLossCap, uint256 intraOpLossCap)
         external
     {
-        if (ICreditManagerV3(order.manager).getBorrowerOrRevert(order.creditAccount) != msg.sender) {
+        if (ICreditManagerV3(creditManager).getBorrowerOrRevert(creditAccount) != msg.sender) {
             revert IncorrectAccountOwner();
         }
 
         delete creditAccountData[creditAccount][creditManager];
         CreditAccountData storage data = creditAccountData[creditAccount][creditManager];
-
-        address facade = ICreditManagerV3(creditManager).creditFacade();
 
         data.initialValue = _getAccountTotalValue(creditManager, creditAccount);
 
@@ -111,7 +111,7 @@ contract AccountManagerBot is Ownable {
     }
 
     /// @notice Perform operation on user's account.
-    /// @param user User address.
+    /// @param creditAccount Credit account.
     /// @param creditManager Credit manager.
     /// @param calls Operation to execute.
     function performOperation(address creditAccount, address creditManager, MultiCall[] calldata calls)
@@ -131,7 +131,7 @@ contract AccountManagerBot is Ownable {
 
         uint256 totalValueBefore = _getAccountTotalValue(creditManager, creditAccount);
 
-        ICreditFacade(facade).botMulticall(user, calls);
+        ICreditFacadeV3(facade).botMulticall(creditAccount, calls);
 
         uint256 totalValueAfter = _getAccountTotalValue(creditManager, creditAccount);
 
@@ -144,9 +144,9 @@ contract AccountManagerBot is Ownable {
         }
     }
 
-    /// ------------------ ///
-    /// INTERNAL FUNCTIONS ///
-    /// ------------------ ///
+    // ------------------ //
+    // INTERNAL FUNCTIONS //
+    // ------------------ //
 
     /// @dev Retrieves the current total value of account
     function _getAccountTotalValue(address creditManager, address creditAccount) internal view returns (uint256) {
