@@ -1,4 +1,6 @@
 @ds-test/=lib/forge-std/lib/ds-test/src/
 @forge-std/=lib/forge-std/src/
+@gearbox-protocol/core-v3/=lib/core-v3/
+@gearbox-protocol/integrations-v3/=lib/integrations-v3/
 @gearbox-protocol/=lib/gearbox-protocol/
 @openzeppelin/=lib/openzeppelin-contracts/

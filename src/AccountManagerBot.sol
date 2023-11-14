@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.10;
 
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-import { ICreditManagerV2 } from "@gearbox-protocol/core-v2/contracts/interfaces/ICreditManagerV2.sol";
-import { ICreditFacade, MultiCall } from "@gearbox-protocol/core-v2/contracts/interfaces/ICreditFacade.sol";
-
+import {
+    ICreditManagerV3,
+    CollateralDebtData,
+    CollateralCalcTask
+} from "@gearbox-protocol/core-v3/contracts/interfaces/ICreditManagerV3.sol";
+import {ICreditFacadeV3} from "@gearbox-protocol/core-v3/contracts/interfaces/ICreditFacadeV3.sol";
+import {ICreditFacadeV3Multicall} from "@gearbox-protocol/core-v3/contracts/interfaces/ICreditFacadeV3Multicall.sol";
 
 /// @notice User data.
-struct UserData {
+struct CreditAccountData {
+    address owner;
     uint256 totalLossCap;
     uint256 intraOpLossCap;
     uint256 initialValue;
@@ -16,11 +21,9 @@ struct UserData {
     uint256 intraOpGain;
 }
 
-
 /// @title Account manager bot.
 /// @notice Allows Gearbox users to transfer control over account to permissioned managers.
 contract AccountManagerBot is Ownable {
-
     /// --------------- ///
     /// STATE VARIABLES ///
     /// --------------- ///
@@ -28,8 +31,8 @@ contract AccountManagerBot is Ownable {
     /// @dev Approved managers.
     mapping(address => bool) public managers;
 
-    /// @notice Registered users data (user => manager => data).
-    mapping(address => mapping(address => UserData)) public userData;
+    /// @notice Registered users data (creditAccount => manager => data).
+    mapping(address => mapping(address => CreditAccountData)) public creditAccountData;
 
     /// ------ ///
     /// ERRORS ///
@@ -37,6 +40,9 @@ contract AccountManagerBot is Ownable {
 
     /// @dev When operation is executed not by approved manager.
     error CallerNotManager();
+
+    /// @dev When the operation is executed by other than the Credit Account's owner.
+    error IncorrectAccountOwner();
 
     /// @dev When user tries to set any of loss caps to zero upon registration.
     error ZeroLossCap();
@@ -59,8 +65,9 @@ contract AccountManagerBot is Ownable {
 
     /// @dev Reverts if caller is not one of approved managers.
     modifier onlyManager() {
-        if (!managers[msg.sender])
+        if (!managers[msg.sender]) {
             revert CallerNotManager();
+        }
         _;
     }
 
@@ -75,80 +82,92 @@ contract AccountManagerBot is Ownable {
         managers[manager] = status;
     }
 
-    /// @notice Allow bot to perform operations on account in given credit manager.
+    /// @notice Register the Credit Account to set loss caps.
     /// @param creditManager Credit manager.
+    /// @param creditAccount Credit Account.
     /// @param totalLossCap Cap on drop of account total value
     ///        in credit manager's underlying currency. Can't be 0.
     /// @param intraOpLossCap Cap on cumulative intra-operation drop of account total value
     ///        in credit manager's underlying currency. Can't be 0.
-    function register(
-        address creditManager,
-        uint256 totalLossCap,
-        uint256 intraOpLossCap
-    ) external {
-        UserData storage data = userData[msg.sender][creditManager];
+    function register(address creditManager, address creditAccount, uint256 totalLossCap, uint256 intraOpLossCap)
+        external
+    {
+        if (ICreditManagerV3(order.manager).getBorrowerOrRevert(order.creditAccount) != msg.sender) {
+            revert IncorrectAccountOwner();
+        }
 
-        address account = ICreditManagerV2(creditManager).getCreditAccountOrRevert(msg.sender);
-        address facade = ICreditManagerV2(creditManager).creditFacade();
+        delete creditAccountData[creditAccount][creditManager];
+        CreditAccountData storage data = creditAccountData[creditAccount][creditManager];
 
-        (data.initialValue, ) = ICreditFacade(facade).calcTotalValue(account);
+        address facade = ICreditManagerV3(creditManager).creditFacade();
 
-        if (totalLossCap == 0 || intraOpLossCap == 0)
+        data.initialValue = _getAccountTotalValue(creditManager, creditAccount);
+
+        if (totalLossCap == 0 || intraOpLossCap == 0) {
             revert ZeroLossCap();
+        }
         data.totalLossCap = totalLossCap;
         data.intraOpLossCap = intraOpLossCap;
-    }
-
-    /// @notice Revoke bot's allowance to manage account in given credit manager.
-    /// @param creditManager Credit manager.
-    function deregister(address creditManager) external {
-        delete userData[msg.sender][creditManager];
     }
 
     /// @notice Perform operation on user's account.
     /// @param user User address.
     /// @param creditManager Credit manager.
     /// @param calls Operation to execute.
-    function performOperation(
-        address user,
-        address creditManager,
-        MultiCall[] calldata calls
-    ) external onlyManager {
-        UserData storage data = userData[user][creditManager];
-        if (data.totalLossCap == 0)
+    function performOperation(address creditAccount, address creditManager, MultiCall[] calldata calls)
+        external
+        onlyManager
+    {
+        CreditAccountData storage data = creditAccountData[creditAccount][creditManager];
+        if (data.totalLossCap == 0) {
             revert UserNotRegistered();
+        }
+        if (ICreditManagerV3(creditManager).getBorrowerOrRevert(creditAccount) != data.owner) {
+            revert IncorrectAccountOwner();
+        }
 
-        address facade = ICreditManagerV2(creditManager).creditFacade();
+        address facade = ICreditManagerV3(creditManager).creditFacade();
         _validateCallsDontChangeDebt(facade, calls);
 
-        address account = ICreditManagerV2(creditManager).getCreditAccountOrRevert(user);
-        (uint256 totalValueBefore, ) = ICreditFacade(facade).calcTotalValue(account);
+        uint256 totalValueBefore = _getAccountTotalValue(creditManager, creditAccount);
 
         ICreditFacade(facade).botMulticall(user, calls);
 
-        (uint256 totalValueAfter, ) = ICreditFacade(facade).calcTotalValue(account);
+        uint256 totalValueAfter = _getAccountTotalValue(creditManager, creditAccount);
+
         bool isLoss = _updateIntraOpLossOrGain(totalValueBefore, totalValueAfter, data);
-        if (isLoss && data.intraOpGain + data.intraOpLossCap < data.intraOpLoss)
+        if (isLoss && data.intraOpGain + data.intraOpLossCap < data.intraOpLoss) {
             revert IntraOpLossCapReached();
-        if (totalValueAfter + data.totalLossCap < data.initialValue)
+        }
+        if (totalValueAfter + data.totalLossCap < data.initialValue) {
             revert TotalLossCapReached();
+        }
     }
 
     /// ------------------ ///
     /// INTERNAL FUNCTIONS ///
     /// ------------------ ///
 
+    /// @dev Retrieves the current total value of account
+    function _getAccountTotalValue(address creditManager, address creditAccount) internal view returns (uint256) {
+        CollateralDebtData memory cdd =
+            ICreditManagerV3(creditManager).calcDebtAndCollateral(creditAccount, CollateralCalcTask.DEBT_COLLATERAL);
+
+        return cdd.totalValue;
+    }
+
     /// @dev Checks that calls don't try to change account's debt.
     function _validateCallsDontChangeDebt(address facade, MultiCall[] calldata calls) internal pure {
-        for (uint256 i = 0; i < calls.length; ) {
+        for (uint256 i = 0; i < calls.length;) {
             MultiCall calldata mcall = calls[i];
             if (mcall.target == facade) {
                 bytes4 method = bytes4(mcall.callData);
                 if (
-                    method == ICreditFacade.increaseDebt.selector
-                    || method == ICreditFacade.decreaseDebt.selector
-                )
+                    method == ICreditFacadeV3Multicall.increaseDebt.selector
+                        || method == ICreditFacadeV3Multicall.decreaseDebt.selector
+                ) {
                     revert ChangeDebtForbidden();
+                }
             }
             unchecked {
                 ++i;
@@ -158,11 +177,10 @@ contract AccountManagerBot is Ownable {
 
     /// @dev Updates intra-operation loss/gain given account's value before and after the operation.
     ///      Returns true if value decreased during the operation and false otherwise.
-    function _updateIntraOpLossOrGain(
-        uint256 totalValueBefore,
-        uint256 totalValueAfter,
-        UserData storage data
-    ) internal returns (bool) {
+    function _updateIntraOpLossOrGain(uint256 totalValueBefore, uint256 totalValueAfter, CreditAccountData storage data)
+        internal
+        returns (bool)
+    {
         if (totalValueAfter < totalValueBefore) {
             uint256 intraOpLoss;
             unchecked {
