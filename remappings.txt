@@ -2,3 +2,4 @@
 @forge-std/=lib/forge-std/src/
 @gearbox-protocol/=lib/gearbox-protocol/
 @openzeppelin/=lib/openzeppelin-contracts/
+@1inch/=lib/1inch/
