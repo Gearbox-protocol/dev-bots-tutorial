@@ -11,23 +11,27 @@ import {ICreditFacadeV3} from "@gearbox-protocol/core-v3/contracts/interfaces/IC
 import {ICreditFacadeV3Multicall} from "@gearbox-protocol/core-v3/contracts/interfaces/ICreditFacadeV3Multicall.sol";
 import {IPriceOracleV3} from "@gearbox-protocol/core-v3/contracts/interfaces/IPriceOracleV3.sol";
 
-/// @notice Limit order data.
-struct Order {
-    address borrower;
-    address manager;
-    address creditAccount;
-    address tokenIn;
-    address tokenOut;
-    uint256 amountIn;
-    uint256 limitPrice;
-    uint256 triggerPrice;
-    uint256 deadline;
-}
-
 /// @title Limit order bot.
-/// @notice Allows Gearbox users to submit limit sell orders.
-///         Arbitrary accounts can execute orders by providing a multicall that swaps assets.
+/// @notice Allows Gearbox users to submit limit sell orders. Arbitrary accounts can execute these orders.
+/// @dev Not designed to handle quoted tokens.
 contract LimitOrderBot {
+    // ----- //
+    // TYPES //
+    // ----- //
+
+    /// @notice Limit order data.
+    struct Order {
+        address borrower;
+        address manager;
+        address account;
+        address tokenIn;
+        address tokenOut;
+        uint256 amountIn;
+        uint256 limitPrice;
+        uint256 triggerPrice;
+        uint256 deadline;
+    }
+
     // --------------- //
     // STATE VARIABLES //
     // --------------- //
@@ -45,17 +49,17 @@ contract LimitOrderBot {
     /// @notice Emitted when user submits a new order.
     /// @param user User that submitted the order.
     /// @param orderId ID of the created order.
-    event OrderCreated(address indexed user, uint256 indexed orderId);
+    event CreateOrder(address indexed user, uint256 indexed orderId);
 
     /// @notice Emitted when user cancels the order.
     /// @param user User that canceled the order.
     /// @param orderId ID of the canceled order.
-    event OrderCanceled(address indexed user, uint256 indexed orderId);
+    event CancelOrder(address indexed user, uint256 indexed orderId);
 
     /// @notice Emitted when order is successfully executed.
     /// @param executor Account that executed the order.
     /// @param orderId ID of the executed order.
-    event OrderExecuted(address indexed executor, uint256 indexed orderId);
+    event ExecuteOrder(address indexed executor, uint256 indexed orderId);
 
     // ------ //
     // ERRORS //
@@ -63,6 +67,9 @@ contract LimitOrderBot {
 
     /// @notice When user tries to submit/cancel other user's order.
     error CallerNotBorrower();
+
+    /// @notice When order can't be executed because it's cancelled.
+    error OrderIsCancelled();
 
     /// @notice When order can't be executed because it's incorrect.
     error InvalidOrder();
@@ -89,13 +96,13 @@ contract LimitOrderBot {
     function submitOrder(Order calldata order) external returns (uint256 orderId) {
         if (
             order.borrower != msg.sender
-                || ICreditManagerV3(order.manager).getBorrowerOrRevert(order.creditAccount) != order.borrower
+                || ICreditManagerV3(order.manager).getBorrowerOrRevert(order.account) != order.borrower
         ) {
             revert CallerNotBorrower();
         }
         orderId = _useOrderId();
         orders[orderId] = order;
-        emit OrderCreated(msg.sender, orderId);
+        emit CreateOrder(msg.sender, orderId);
     }
 
     /// @notice Cancel pending order.
@@ -106,10 +113,10 @@ contract LimitOrderBot {
             revert CallerNotBorrower();
         }
         delete orders[orderId];
-        emit OrderCanceled(msg.sender, orderId);
+        emit CancelOrder(msg.sender, orderId);
     }
 
-    /// @notice Execute given order.
+    /// @notice Execute given order. Output token will be transferred from caller to this contract.
     /// @param orderId ID of order to execute.
     function executeOrder(uint256 orderId) external {
         Order storage order = orders[orderId];
@@ -119,24 +126,21 @@ contract LimitOrderBot {
         IERC20(order.tokenOut).transferFrom(msg.sender, address(this), minAmountOut);
         IERC20(order.tokenOut).approve(order.manager, minAmountOut + 1);
 
-        MultiCall[] memory calls = new MultiCall[](2);
-
         address facade = ICreditManagerV3(order.manager).creditFacade();
 
+        MultiCall[] memory calls = new MultiCall[](2);
         calls[0] = MultiCall({
             target: facade,
             callData: abi.encodeCall(ICreditFacadeV3Multicall.addCollateral, (order.tokenOut, minAmountOut))
         });
-
         calls[1] = MultiCall({
             target: facade,
             callData: abi.encodeCall(ICreditFacadeV3Multicall.withdrawCollateral, (order.tokenIn, amountIn, msg.sender))
         });
-
-        ICreditFacadeV3(facade).botMulticall(order.creditAccount, calls);
+        ICreditFacadeV3(facade).botMulticall(order.account, calls);
 
         delete orders[orderId];
-        emit OrderExecuted(msg.sender, orderId);
+        emit ExecuteOrder(msg.sender, orderId);
     }
 
     // ------------------ //
@@ -152,10 +156,13 @@ contract LimitOrderBot {
     /// @dev Checks if order can be executed:
     ///      * order must be correctly constructed and not expired;
     ///      * trigger condition must hold if trigger price is set;
-    ///      * borrower must have an account in manager with non-empty
-    ///        input token balance.
+    ///      * borrower must have an account in manager with non-empty input token balance.
     function _validateOrder(Order memory order) internal view returns (uint256 amountIn, uint256 minAmountOut) {
-        if (ICreditManagerV3(order.manager).getBorrowerOrRevert(order.creditAccount) != order.borrower) {
+        if (order.account == address(0)) {
+            revert OrderIsCancelled();
+        }
+
+        if (ICreditManagerV3(order.manager).getBorrowerOrRevert(order.account) != order.borrower) {
             revert CreditAccountBorrowerChanged();
         }
 
@@ -176,7 +183,7 @@ contract LimitOrderBot {
             }
         }
 
-        uint256 balanceIn = IERC20(order.tokenIn).balanceOf(order.creditAccount);
+        uint256 balanceIn = IERC20(order.tokenIn).balanceOf(order.account);
         if (balanceIn <= 1) {
             revert NothingToSell();
         }

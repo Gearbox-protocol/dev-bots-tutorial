@@ -5,3 +5,4 @@ libs = ['lib']
 solc_version = '0.8.22'
 evm_version = 'shanghai'
 gas_reports = ['LimitOrderBot', 'AccountManagerBot']
+verbosity = 3
